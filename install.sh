@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+PROJECT_DIR="$(pwd -P)"
 COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
 ENV_FILE="$PROJECT_DIR/.env"
 readonly CONTAINER_NAME="outlook-mail-reader"
@@ -39,6 +38,28 @@ docker_cmd() {
 
 compose_cmd() {
     docker_cmd compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+write_compose_file() {
+    mkdir -p "$PROJECT_DIR"
+    cat >"$COMPOSE_FILE" <<'COMPOSE'
+services:
+  outlook-mail-reader:
+    image: seldomzq/email:latest
+    container_name: outlook-mail-reader
+    ports:
+      - "${OUTLOOK_EMAIL_PORT:-5000}:5000"
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - LOGIN_PASSWORD=${LOGIN_PASSWORD}
+      - SECRET_KEY=${SECRET_KEY}
+      - FLASK_ENV=production
+      - DOCKER_UPDATE_ENABLED=true
+      - DOCKER_UPDATE_CONTAINER=outlook-mail-reader
+    restart: unless-stopped
+COMPOSE
 }
 
 detect_os() {
@@ -381,10 +402,13 @@ print_summary() {
 
 usage() {
     cat <<'USAGE'
-Usage: scripts/install.sh [--project-dir PATH]
+Usage: install.sh [--install-dir PATH]
 
-Install Docker when needed, configure .env, pull seldomzq/email:latest,
-and start the production Compose service.
+Install Docker when needed, write the embedded Compose configuration,
+configure .env, pull seldomzq/email:latest, and start the service.
+
+The default install directory is the current working directory.
+--project-dir is retained as an alias for --install-dir.
 USAGE
 }
 
@@ -392,8 +416,8 @@ main() {
     local project_dir_arg='' distro configured_port selected_port
     while (($# > 0)); do
         case "$1" in
-            --project-dir)
-                [[ $# -ge 2 ]] || die '--project-dir requires a path.'
+            --project-dir|--install-dir)
+                [[ $# -ge 2 ]] || die "$1 requires a path."
                 project_dir_arg="$2"
                 shift 2
                 ;;
@@ -408,14 +432,14 @@ main() {
     done
 
     if [[ -n "$project_dir_arg" ]]; then
-        PROJECT_DIR="$(cd -- "$project_dir_arg" && pwd)"
+        mkdir -p "$project_dir_arg"
+        PROJECT_DIR="$(cd -- "$project_dir_arg" && pwd -P)"
         COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
         ENV_FILE="$PROJECT_DIR/.env"
     fi
-    [[ -f "$COMPOSE_FILE" ]] || die "Cannot find $COMPOSE_FILE. Run this script from the project or pass --project-dir."
-
     require_linux_systemd
     require_privileges
+    write_compose_file
     distro="$(detect_os)"
     log "Detected supported distribution: $distro"
     ensure_docker "$distro"
