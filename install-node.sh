@@ -7,8 +7,8 @@ IDENTITY_DIR="$DATA_DIR/cluster"
 IDENTITY_DB="$IDENTITY_DIR/identity.db"
 COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
 ENV_FILE="$PROJECT_DIR/.env"
-readonly IMAGE_NAME="seldomzq/email:latest"
-readonly CONTAINER_NAME="outlook-mail-replica"
+IMAGE_NAME="seldomzq/email:latest"
+CONTAINER_NAME="outlook-mail-reader"
 readonly DEFAULT_PORT=5000
 readonly MIN_PORT=1024
 readonly MAX_PORT=65535
@@ -54,13 +54,37 @@ compose_cmd() {
     docker_cmd compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
+validate_container_name() {
+    local name="$1"
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] \
+        || die 'Container name must start with a letter or digit and use only letters, digits, dot, dash, or underscore.'
+}
+
+set_container_name() {
+    local name="$1"
+    validate_container_name "$name"
+    CONTAINER_NAME="$name"
+}
+
+validate_image_version() {
+    local version="$1"
+    [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
+        || die 'Image version must use letters, digits, dot, dash, or underscore.'
+}
+
+set_image_version() {
+    local version="$1"
+    validate_image_version "$version"
+    IMAGE_NAME="seldomzq/email:$version"
+}
+
 write_compose_file() {
     mkdir -p "$PROJECT_DIR"
     cat >"$COMPOSE_FILE" <<'COMPOSE'
 services:
   outlook-mail-replica:
-    image: seldomzq/email:latest
-    container_name: outlook-mail-replica
+    image: __OUTLOOK_EMAIL_IMAGE__
+    container_name: __OUTLOOK_EMAIL_CONTAINER__
     ports:
       - "${OUTLOOK_EMAIL_PORT:-5000}:5000"
     volumes:
@@ -71,6 +95,8 @@ services:
       - SECRET_KEY=${SECRET_KEY}
     restart: unless-stopped
 COMPOSE
+    sed -i "s|__OUTLOOK_EMAIL_IMAGE__|$IMAGE_NAME|g" "$COMPOSE_FILE"
+    sed -i "s|__OUTLOOK_EMAIL_CONTAINER__|$CONTAINER_NAME|g" "$COMPOSE_FILE"
 }
 
 detect_os() {
@@ -249,10 +275,18 @@ is_port_available() {
 
 choose_port() {
     local configured_port="${1:-$DEFAULT_PORT}"
+    local explicit="${2:-0}"
     local candidate
+    if [[ "$explicit" == '1' ]] && ! is_valid_port "$configured_port"; then
+        die "Host port must be an integer between $MIN_PORT and $MAX_PORT."
+    fi
     if is_port_available "$configured_port"; then
         printf '%s\n' "$configured_port"
         return 0
+    fi
+
+    if [[ "$explicit" == '1' ]]; then
+        die "Host port $configured_port is already in use. Choose another port."
     fi
 
     warn "Host port $configured_port is already in use."
@@ -274,7 +308,23 @@ read_env_value() {
     local file="$1"
     local key="$2"
     [[ -f "$file" ]] || return 0
-    awk -v prefix="$key=" 'index($0, prefix) == 1 { sub(/^[^=]*=/, ""); sub(/\r$/, ""); print; exit }' "$file"
+    awk -v key="$key" '
+        BEGIN { assignment = "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" }
+        $0 ~ assignment {
+            value = $0
+            sub(assignment, "", value)
+            sub(/\r$/, "", value)
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            first = substr(value, 1, 1)
+            last = substr(value, length(value), 1)
+            if (length(value) >= 2 && ((first == "\"" && last == "\"") || (first == "\047" && last == "\047"))) {
+                value = substr(value, 2, length(value) - 2)
+            }
+            print value
+            exit
+        }
+    ' "$file"
 }
 
 upsert_env_var() {
@@ -286,8 +336,9 @@ upsert_env_var() {
     mkdir -p "$directory"
     temporary="$(mktemp "$directory/.env.tmp.XXXXXX")"
     if [[ -f "$file" ]]; then
-        awk -v prefix="$key=" -v replacement="$key=$value" '
-            index($0, prefix) == 1 {
+        awk -v key="$key" -v replacement="$key=$value" '
+            BEGIN { assignment = "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" }
+            $0 ~ assignment {
                 if (!updated) print replacement
                 updated = 1
                 next
@@ -452,20 +503,40 @@ print_summary() {
 
 usage() {
     cat <<'USAGE'
-Usage: install-node.sh --master URL --node-id ID --master-fingerprint FINGERPRINT [--install-dir PATH]
+Usage: install-node.sh --master URL --node-id ID --master-fingerprint FINGERPRINT [--v VERSION] [--n CONTAINER_NAME] [--p PORT] [--install-dir PATH]
 
 Install or repair Docker and Docker Compose, persist replica-local configuration,
-enroll the replica when needed, pull seldomzq/email:latest, and start the node.
+enroll the replica when needed, pull the selected seldomzq/email image, and start the node.
 
 The default install directory is the current working directory.
+--v VERSION selects the email image tag (default: latest).
+--n CONTAINER_NAME selects the replica container name (default: outlook-mail-reader).
+--p PORT selects the host port mapped to container port 5000 (default: 5000).
 --project-dir is retained as an alias for --install-dir.
 USAGE
 }
 
 main() {
-    local project_dir_arg="" distro configured_port selected_port
+    local project_dir_arg="" distro configured_port selected_port requested_port=""
+    local port_arg_set=0
     while (($# > 0)); do
         case "$1" in
+            --v)
+                [[ $# -ge 2 ]] || die '--v requires a value.'
+                set_image_version "$2"
+                shift 2
+                ;;
+            --n)
+                [[ $# -ge 2 ]] || die '--n requires a value.'
+                set_container_name "$2"
+                shift 2
+                ;;
+            --p)
+                [[ $# -ge 2 ]] || die '--p requires a value.'
+                requested_port="$2"
+                port_arg_set=1
+                shift 2
+                ;;
             --master)
                 [[ $# -ge 2 ]] || die '--master requires a value.'
                 MASTER_URL="$2"
@@ -526,8 +597,11 @@ main() {
     chmod 600 "$ENV_FILE"
     write_compose_file
     configured_port="$(read_env_value "$ENV_FILE" OUTLOOK_EMAIL_PORT || true)"
+    if ((port_arg_set)); then
+        configured_port="$requested_port"
+    fi
     [[ -n "$configured_port" ]] || configured_port="$DEFAULT_PORT"
-    selected_port="$(choose_port "$configured_port")"
+    selected_port="$(choose_port "$configured_port" "$port_arg_set")"
     prepare_env
     upsert_env_var "$ENV_FILE" OUTLOOK_EMAIL_PORT "$selected_port"
     if refresh_and_start; then

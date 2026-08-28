@@ -5,9 +5,9 @@ PROJECT_DIR="$(pwd -P)"
 COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
 ENV_FILE="$PROJECT_DIR/.env"
 readonly NPM_CONTAINER_NAME="nginx-proxy-manager"
-readonly MAIL_CONTAINER_NAME="outlook-mail-reader"
+MAIL_CONTAINER_NAME="outlook-mail-reader"
 readonly NPM_IMAGE="jc21/nginx-proxy-manager:latest"
-readonly MAIL_IMAGE="seldomzq/email:latest"
+MAIL_IMAGE="seldomzq/email:latest"
 readonly NPM_PORTS=(80 443 81)
 readonly NPM_HEALTHCHECK_TIMEOUT_SECONDS="${NPM_HEALTHCHECK_TIMEOUT_SECONDS:-120}"
 readonly MAIL_HEALTHCHECK_TIMEOUT_SECONDS="${MAIL_HEALTHCHECK_TIMEOUT_SECONDS:-60}"
@@ -39,6 +39,30 @@ docker_cmd() {
 
 compose_cmd() {
     docker_cmd compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+validate_container_name() {
+    local name="$1"
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] \
+        || die 'Container name must start with a letter or digit and use only letters, digits, dot, dash, or underscore.'
+}
+
+set_container_name() {
+    local name="$1"
+    validate_container_name "$name"
+    MAIL_CONTAINER_NAME="$name"
+}
+
+validate_image_version() {
+    local version="$1"
+    [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
+        || die 'Image version must use letters, digits, dot, dash, or underscore.'
+}
+
+set_image_version() {
+    local version="$1"
+    validate_image_version "$version"
+    MAIL_IMAGE="seldomzq/email:$version"
 }
 
 detect_os() {
@@ -198,7 +222,23 @@ read_env_value() {
     local file="$1"
     local key="$2"
     [[ -f "$file" ]] || return 0
-    awk -v prefix="$key=" 'index($0, prefix) == 1 { sub(/^[^=]*=/, ""); print; exit }' "$file"
+    awk -v key="$key" '
+        BEGIN { assignment = "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" }
+        $0 ~ assignment {
+            value = $0
+            sub(assignment, "", value)
+            sub(/\r$/, "", value)
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            first = substr(value, 1, 1)
+            last = substr(value, length(value), 1)
+            if (length(value) >= 2 && ((first == "\"" && last == "\"") || (first == "\047" && last == "\047"))) {
+                value = substr(value, 2, length(value) - 2)
+            }
+            print value
+            exit
+        }
+    ' "$file"
 }
 
 upsert_env_var() {
@@ -210,8 +250,9 @@ upsert_env_var() {
     mkdir -p "$directory"
     temporary="$(mktemp "$directory/.env.tmp.XXXXXX")"
     if [[ -f "$file" ]]; then
-        awk -v prefix="$key=" -v replacement="$key=$value" '
-            index($0, prefix) == 1 {
+        awk -v key="$key" -v replacement="$key=$value" '
+            BEGIN { assignment = "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" }
+            $0 ~ assignment {
                 if (!updated) print replacement
                 updated = 1
                 next
@@ -348,8 +389,8 @@ services:
       - ./npm/letsencrypt:/etc/letsencrypt
 
   outlook-mail-reader:
-    image: seldomzq/email:latest
-    container_name: outlook-mail-reader
+    image: __OUTLOOK_EMAIL_IMAGE__
+    container_name: __OUTLOOK_EMAIL_CONTAINER__
     networks:
       - npm
     volumes:
@@ -360,7 +401,7 @@ services:
       - SECRET_KEY=${SECRET_KEY}
       - FLASK_ENV=production
       - DOCKER_UPDATE_ENABLED=true
-      - DOCKER_UPDATE_CONTAINER=outlook-mail-reader
+      - DOCKER_UPDATE_CONTAINER=__OUTLOOK_EMAIL_CONTAINER__
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:5000/ >/dev/null || exit 1"]
@@ -374,6 +415,8 @@ networks:
     name: npm
     attachable: true
 COMPOSE
+    sed -i "s|__OUTLOOK_EMAIL_IMAGE__|$MAIL_IMAGE|g" "$COMPOSE_FILE"
+    sed -i "s|__OUTLOOK_EMAIL_CONTAINER__|$MAIL_CONTAINER_NAME|g" "$COMPOSE_FILE"
 }
 
 show_service_diagnostics() {
@@ -384,13 +427,13 @@ show_service_diagnostics() {
 }
 
 start_npm() {
-    log "Pulling the latest $NPM_IMAGE image."
+    log "Pulling $NPM_IMAGE."
     compose_cmd pull npm || return $?
     compose_cmd up -d npm
 }
 
 start_mail() {
-    log "Pulling the latest $MAIL_IMAGE image."
+    log "Pulling $MAIL_IMAGE."
     compose_cmd pull outlook-mail-reader || return $?
     compose_cmd up -d outlook-mail-reader
 }
@@ -420,22 +463,20 @@ wait_for_mail() {
 
 deploy_services() {
     local status
-    start_npm
-    status=$?
-    if ((status != 0)); then
+    start_npm || {
+        status=$?
         show_service_diagnostics "$NPM_CONTAINER_NAME"
         return "$status"
-    fi
+    }
     if ! wait_for_npm; then
         show_service_diagnostics "$NPM_CONTAINER_NAME"
         return 1
     fi
-    start_mail
-    status=$?
-    if ((status != 0)); then
+    start_mail || {
+        status=$?
         show_service_diagnostics "$MAIL_CONTAINER_NAME"
         return "$status"
-    fi
+    }
     if ! wait_for_mail; then
         show_service_diagnostics "$MAIL_CONTAINER_NAME"
         return 1
@@ -460,12 +501,14 @@ print_summary() {
 
 usage() {
     cat <<'USAGE'
-Usage: install-with-npm.sh [--install-dir PATH]
+Usage: install-with-npm.sh [--v VERSION] [--n CONTAINER_NAME] [--install-dir PATH]
 
 Install Docker when needed, deploy Nginx Proxy Manager on ports 80, 443,
 and 81, then deploy OutlookEmail on the private npm Docker network.
 
 The default install directory is the current working directory.
+--v VERSION selects the email image tag (default: latest).
+--n CONTAINER_NAME selects the mail container name (default: outlook-mail-reader).
 --project-dir is retained as an alias for --install-dir.
 USAGE
 }
@@ -474,6 +517,16 @@ main() {
     local project_dir_arg='' distro
     while (($# > 0)); do
         case "$1" in
+            --v)
+                [[ $# -ge 2 ]] || die '--v requires a value.'
+                set_image_version "$2"
+                shift 2
+                ;;
+            --n)
+                [[ $# -ge 2 ]] || die '--n requires a value.'
+                set_container_name "$2"
+                shift 2
+                ;;
             --project-dir|--install-dir)
                 [[ $# -ge 2 ]] || die "$1 requires a path."
                 project_dir_arg="$2"
