@@ -28,7 +28,6 @@ The script accepts these flags:
 - `--nacos-namespace ID`
 - `--nacos-group NAME`
 - `--nacos-username USER`
-- `--nacos-password PASS`
 - `--http-port PORT`
 - `--https-port PORT`
 - `--admin-port PORT`
@@ -83,7 +82,6 @@ For unattended installs, pass every value explicitly:
   --nacos-namespace public \
   --nacos-group DEFAULT_GROUP \
   --nacos-username nacos-user \
-  --nacos-password 'nacos-password' \
   --http-port 9080 \
   --https-port 9443 \
   --admin-port 9180 \
@@ -93,6 +91,12 @@ For unattended installs, pass every value explicitly:
   --dashboard-port 9000 \
   --dashboard-username admin \
   --dashboard-password 'dashboard-password'
+```
+
+For an unattended authenticated install, provide `NACOS_PASSWORD` in the process environment instead of a command-line flag so it does not appear in shell history or the process list:
+
+```bash
+NACOS_PASSWORD='nacos-password' ./install-apisix-nacos.sh --nacos-username nacos-user --nacos-url http://nacos.example.test:8848/nacos
 ```
 
 Behavior to keep in mind:

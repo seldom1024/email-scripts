@@ -725,7 +725,6 @@ Options:
   --nacos-namespace ID
   --nacos-group NAME
   --nacos-username USER
-  --nacos-password PASS
   --http-port PORT
   --https-port PORT
   --admin-port PORT
@@ -771,11 +770,6 @@ main() {
             --nacos-username)
                 [[ $# -ge 2 ]] || die '--nacos-username requires a value.'
                 NACOS_USERNAME="$2"
-                shift 2
-                ;;
-            --nacos-password)
-                [[ $# -ge 2 ]] || die '--nacos-password requires a value.'
-                NACOS_PASSWORD="$2"
                 shift 2
                 ;;
             --http-port)
