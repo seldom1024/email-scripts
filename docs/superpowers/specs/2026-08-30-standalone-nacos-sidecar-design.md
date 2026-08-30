@@ -29,8 +29,10 @@ The installer rejects non-Linux systems because Docker Desktop host networking a
 The installer creates a dedicated project directory, defaulting to:
 
 ```text
-/opt/mail-nacos-sidecar
+./mail-nacos-sidecar
 ```
+
+The relative default is resolved from the directory where the installer is invoked and then normalized to an absolute path for all generated files and Compose commands.
 
 It generates only:
 
