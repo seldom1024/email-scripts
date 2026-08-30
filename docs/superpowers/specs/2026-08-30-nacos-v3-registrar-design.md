@@ -63,4 +63,3 @@ The mock Nacos lifecycle server is changed to the v3 paths and JSON result envel
 - Registration after replica recovery.
 - The complete unauthenticated lifecycle.
 - Generated registrar syntax, Compose parsing when Docker is available, Bash syntax, LF endings, and sensitive-pattern scans.
-
