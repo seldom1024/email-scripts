@@ -70,7 +70,13 @@ The installer supports these non-secret CLI options:
 --nacos-username
 ```
 
-Missing Nacos URL and registration IP are requested interactively. The service name and other values present their defaults for confirmation. The registration IP must be an explicit usable IPv4 address; the installer never calls a public IP-detection service.
+When `--advertise-ip` is not passed and no existing `.env` value is available, the installer prompts exactly:
+
+```text
+注册ip:
+```
+
+The service name and other values present their defaults for confirmation. The registration IP must be an explicit usable IPv4 address; the installer never calls a public IP-detection service and never silently chooses an address.
 
 For Nacos authentication, pressing Enter at the username prompt selects unauthenticated mode. When a username is entered, the password is read without echo. For unattended authenticated installation, `NACOS_USERNAME` and `NACOS_PASSWORD` may be provided together in the process environment. There is no password command-line option.
 
