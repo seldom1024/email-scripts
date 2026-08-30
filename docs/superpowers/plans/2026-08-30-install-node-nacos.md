@@ -17,14 +17,14 @@
 - Create: `tests/test_install_node_nacos.sh`
 - Create: `tests/test_nacos_registrar.py`
 
-- [ ] **Step 1: Require LF shell and Python files**
+- [x] **Step 1: Require LF shell and Python files**
 
 ```gitattributes
 *.sh text eol=lf
 *.py text eol=lf
 ```
 
-- [ ] **Step 2: Write the failing shell contract test**
+- [x] **Step 2: Write the failing shell contract test**
 
 The test must source the installer with `INSTALLER_LIB_ONLY=1`, generate artifacts in a temporary directory, and assert:
 
@@ -38,11 +38,11 @@ assert_not_contains "$SCRIPT" 'api.ipify.org'
 
 It must also run invalid IPv4, URL, identifier, and partial-credential cases in subshells and require nonzero status.
 
-- [ ] **Step 3: Write the failing registrar lifecycle test**
+- [x] **Step 3: Write the failing registrar lifecycle test**
 
 Use two local `ThreadingHTTPServer` instances: one returns ready status and the other records Nacos requests. Run the generated registrar as a subprocess with one-second intervals, wait for `POST /nacos/v1/ns/instance` and `PUT /nacos/v1/ns/instance/beat`, terminate it, then require `DELETE /nacos/v1/ns/instance`.
 
-- [ ] **Step 4: Run tests and verify red state**
+- [x] **Step 4: Run tests and verify red state**
 
 Run:
 
@@ -58,11 +58,11 @@ Expected: failure because `install-node-nacos.sh` does not exist.
 - Create: `install-node-nacos.sh`
 - Test: `tests/test_install_node_nacos.sh`
 
-- [ ] **Step 1: Preserve the existing installer foundation**
+- [x] **Step 1: Preserve the existing installer foundation**
 
 Copy the current `install-node.sh` behavior into the new self-contained file, retaining `set -Eeuo pipefail`, Docker installation, replica enrollment, port selection, `.env` persistence, diagnostics, and `INSTALLER_LIB_ONLY`.
 
-- [ ] **Step 2: Add Nacos configuration and validation**
+- [x] **Step 2: Add Nacos configuration and validation**
 
 Define these required values and validators:
 
@@ -90,7 +90,7 @@ rejects newline characters before either value is written to `.env`.
 
 Parse the six documented Nacos CLI options and require URL, service, and advertised IP before host mutation begins.
 
-- [ ] **Step 3: Persist sidecar configuration**
+- [x] **Step 3: Persist sidecar configuration**
 
 Extend environment preparation to upsert:
 
@@ -107,15 +107,15 @@ NACOS_PASSWORD
 
 Reuse existing credentials from `.env`; accept new credentials only through process environment; require username and password together.
 
-- [ ] **Step 4: Generate Compose and registrar artifacts**
+- [x] **Step 4: Generate Compose and registrar artifacts**
 
 Add `REGISTRAR_FILE="$PROJECT_DIR/nacos/registrar.py"`. Generate it atomically with mode 600. Extend Compose with `nacos-registrar`, read-only script mount, Nacos variables, internal readiness URL, bounded intervals, `restart: unless-stopped`, and a stop grace period.
 
-- [ ] **Step 5: Start and diagnose both services**
+- [x] **Step 5: Start and diagnose both services**
 
 Pull both images, start the Compose project, retain the existing business readiness gate, and show logs for both containers after failures. The summary must report Nacos service identity and advertised endpoint without printing credentials.
 
-- [ ] **Step 6: Run shell tests and verify green state**
+- [x] **Step 6: Run shell tests and verify green state**
 
 Run:
 
@@ -131,27 +131,27 @@ Expected: all shell contract checks pass and the Python lifecycle test is invoke
 - Modify: `install-node-nacos.sh`
 - Test: `tests/test_nacos_registrar.py`
 
-- [ ] **Step 1: Implement configuration and URL building**
+- [x] **Step 1: Implement configuration and URL building**
 
 The generated registrar must use `os.environ`, `ipaddress.ip_address`, and `urllib.parse`. Normalize either `http://host:8848` or `http://host:8848/nacos` to a single `/nacos/v1` API base.
 
-- [ ] **Step 2: Implement authenticated HTTP requests**
+- [x] **Step 2: Implement authenticated HTTP requests**
 
 Use `urllib.request` with bounded timeouts. If credentials exist, obtain `accessToken` from `POST /nacos/v1/auth/users/login`; refresh once after HTTP 401 or 403. Never include passwords or tokens in logs.
 
-- [ ] **Step 3: Implement register, heartbeat, and deregister**
+- [x] **Step 3: Implement register, heartbeat, and deregister**
 
 Register an ephemeral healthy instance through `POST /ns/instance`, heartbeat through `PUT /ns/instance/beat`, and deregister through `DELETE /ns/instance`. Use identical service, namespace, group, cluster, IP, and port values for all operations.
 
-- [ ] **Step 4: Implement health-driven state transitions**
+- [x] **Step 4: Implement health-driven state transitions**
 
 Probe the replica readiness URL. Register only while ready, deregister after readiness is lost, recover registration after readiness returns, and retry Nacos failures with exponential backoff capped at 30 seconds.
 
-- [ ] **Step 5: Implement signal cleanup**
+- [x] **Step 5: Implement signal cleanup**
 
 SIGTERM and SIGINT set a stop event. The `finally` block attempts bounded deregistration and exits without hanging Compose shutdown.
 
-- [ ] **Step 6: Run lifecycle integration test**
+- [x] **Step 6: Run lifecycle integration test**
 
 Run:
 
@@ -166,7 +166,7 @@ Expected: register, heartbeat, and deregister assertions pass.
 **Files:**
 - Modify: `docs/superpowers/plans/2026-08-30-install-node-nacos.md`
 
-- [ ] **Step 1: Run syntax checks**
+- [x] **Step 1: Run syntax checks**
 
 ```bash
 bash -n install-node.sh
@@ -174,13 +174,13 @@ bash -n install-node-nacos.sh
 python -m py_compile tests/test_nacos_registrar.py
 ```
 
-- [ ] **Step 2: Run the complete test suite**
+- [x] **Step 2: Run the complete test suite**
 
 ```bash
 bash tests/test_install_node_nacos.sh
 ```
 
-- [ ] **Step 3: Scan for leaked configuration**
+- [x] **Step 3: Scan for leaked configuration**
 
 ```bash
 rg -n -F -e 'APISIX_ADMIN_URL' -e 'ADMIN_KEY="123"' .
@@ -188,7 +188,7 @@ rg -n -F -e 'APISIX_ADMIN_URL' -e 'ADMIN_KEY="123"' .
 
 Expected: no matches outside historical design discussion; executable/configuration files contain none.
 
-- [ ] **Step 4: Review the diff**
+- [x] **Step 4: Review the diff**
 
 ```bash
 git diff --check
@@ -196,6 +196,6 @@ git status --short
 git diff --stat HEAD
 ```
 
-- [ ] **Step 5: Commit implementation with Lore trailers**
+- [x] **Step 5: Commit implementation with Lore trailers**
 
 Stage only `.gitattributes`, `install-node-nacos.sh`, tests, and the implementation plan. Record test evidence and the intentional sidecar boundary in the commit message.
