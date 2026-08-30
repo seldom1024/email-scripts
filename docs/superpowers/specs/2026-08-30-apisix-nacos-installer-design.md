@@ -23,7 +23,7 @@ The default Compose project contains:
 2. `apisix`, using the official APISIX image, mounting the generated `config.yaml`, and exposing HTTP `9080`, HTTPS `9443`, and Admin API `9180`;
 3. `apisix-dashboard`, only when requested, using the official Dashboard image and exposing port `9000`.
 
-The Admin API binds to localhost by default. Dashboard communicates with the Admin API over the private Compose network. Public proxy ports remain available for traffic. Host port values are configurable so an existing service can avoid conflicts.
+The Admin API binds to localhost by default. Dashboard communicates with etcd over the private Compose network. Public proxy ports remain available for traffic. Host port values are configurable so an existing service can avoid conflicts.
 
 ## Interactive Inputs
 
