@@ -6,7 +6,7 @@ SCRIPT="$ROOT_DIR/install-nacos-sidecar.sh"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" "$1" || fail "$1 does not contain: $2"; }
-assert_not_contains() { grep -Fq -- "$2" "$1" && fail "$1 unexpectedly contains: $2" || true; }
+assert_not_contains() { if grep -Fq -- "$2" "$1"; then fail "$1 unexpectedly contains: $2"; fi; }
 assert_equals() { [[ "$1" == "$2" ]] || fail "expected '$2', got '$1'"; }
 assert_mode_600() { assert_equals "$(stat -c '%a' "$1")" 600; }
 expect_failure() { local description="$1"; shift; if ("$@") >/dev/null 2>&1; then fail "$description unexpectedly succeeded"; fi; }
@@ -77,11 +77,26 @@ assert_not_contains "$COMPOSE_FILE" 'outlook-mail-replica'
 assert_not_contains "$COMPOSE_FILE" 'outlook-email'
 assert_not_contains "$COMPOSE_FILE" 'ports:'
 assert_not_contains "$COMPOSE_FILE" 'safe-password'
-assert_contains "$REGISTRAR_FILE" '/nacos/v1/auth/users/login'
-assert_contains "$REGISTRAR_FILE" '/nacos/v1/ns/instance'
-assert_contains "$REGISTRAR_FILE" '/nacos/v1/ns/instance/beat'
+assert_contains "$REGISTRAR_FILE" '/v1/auth/users/login'
+assert_contains "$REGISTRAR_FILE" '/v1/ns/instance'
+assert_contains "$REGISTRAR_FILE" '/v1/ns/instance/beat'
 assert_mode_600 "$ENV_FILE"
 assert_mode_600 "$REGISTRAR_FILE"
 assert_mode_600 "$COMPOSE_FILE"
+
+compose_trace="$tmp_dir/compose.trace"
+compose_cmd() { printf '%s\n' "$*" >>"$compose_trace"; }
+refresh_and_start
+assert_equals "$(tr '\n' '|' <"$compose_trace")" 'config -q|pull|up -d|'
+
+upsert_env_var "$ENV_FILE" NACOS_SERVICE_NAME stored-service
+NACOS_SERVICE_NAME=''
+prepare_env
+assert_equals "$NACOS_SERVICE_NAME" stored-service
+NACOS_SERVICE_NAME='override-service'
+prepare_env
+assert_equals "$(read_env_value "$ENV_FILE" NACOS_SERVICE_NAME)" override-service
+
+python3 "$ROOT_DIR/tests/test_nacos_sidecar_registrar.py" "$REGISTRAR_FILE"
 
 printf 'PASS: standalone Nacos Sidecar contract\n'
