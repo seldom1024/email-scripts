@@ -11,9 +11,9 @@ ENV_FILE="$PROJECT_DIR/.env"
 APISIX_CONFIG_FILE="$PROJECT_DIR/config.yaml"
 DASHBOARD_CONFIG_FILE="$PROJECT_DIR/dashboard-conf.yaml"
 
-APISIX_IMAGE="apache/apisix:3.10.0-debian"
-ETCD_IMAGE="quay.io/coreos/etcd:v3.5.15"
-DASHBOARD_IMAGE="apache/apisix-dashboard:3.0.1"
+APISIX_IMAGE="apache/apisix:3.18.0-debian"
+ETCD_IMAGE="quay.io/coreos/etcd:v3.5.18"
+DASHBOARD_IMAGE="apache/apisix-dashboard:3.0.1-alpine"
 
 readonly DEFAULT_APISIX_HTTP_PORT=9080
 readonly DEFAULT_APISIX_HTTPS_PORT=9443
@@ -46,6 +46,34 @@ DASHBOARD_JWT_SECRET="${DASHBOARD_JWT_SECRET:-}"
 log() { printf '[install-apisix-nacos] %s\n' "$*"; }
 warn() { printf '[install-apisix-nacos] WARNING: %s\n' "$*" >&2; }
 die() { printf '[install-apisix-nacos] ERROR: %s\n' "$*" >&2; exit 1; }
+
+effective_uid() {
+    printf '%s\n' "${EUID:-$(id -u)}"
+}
+
+run_root() {
+    if [[ "$(effective_uid)" -eq 0 ]]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        die 'root privileges or sudo are required.'
+    fi
+}
+
+docker_cmd() {
+    if [[ "$(effective_uid)" -eq 0 ]]; then
+        docker "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo docker "$@"
+    else
+        die 'Docker access requires root privileges or sudo.'
+    fi
+}
+
+compose_cmd() {
+    docker_cmd compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
 
 set_project_dir() {
     local directory="$1"
@@ -145,8 +173,8 @@ url_origin() {
 
 validate_url() {
     local value="$1"
-    [[ "$value" =~ ^https?://[^[:space:]?#]+$ ]] \
-        || die 'URL must use http or https without query or fragment.'
+    [[ "$value" =~ ^https?://[^/:[:space:]?#]+(:[0-9]+)?(/nacos)?/?$ ]] \
+        || die 'URL must use http or https://host[:port] with an optional /nacos path and no query or fragment.'
 }
 
 validate_identifier() {
@@ -195,6 +223,76 @@ validate_dashboard_credentials() {
         || die 'Dashboard password cannot contain newlines.'
     (( ${#DASHBOARD_PASSWORD} >= DASHBOARD_PASSWORD_MIN_LENGTH )) \
         || die "Dashboard password must be at least $DASHBOARD_PASSWORD_MIN_LENGTH characters."
+}
+
+require_linux() {
+    [[ "$(uname -s)" == 'Linux' ]] || die 'This installer supports Linux servers only.'
+}
+
+require_privileges() {
+    if [[ "$(effective_uid)" -eq 0 ]]; then
+        return 0
+    fi
+    command -v sudo >/dev/null 2>&1 || die 'Run as root or install sudo before running this installer.'
+    sudo -v || die 'Unable to obtain sudo privileges.'
+}
+
+ensure_docker() {
+    command -v curl >/dev/null 2>&1 || die 'curl is required.'
+    command -v docker >/dev/null 2>&1 || die 'Docker is not installed.'
+    docker_cmd info >/dev/null 2>&1 || die 'Docker daemon is not available.'
+}
+
+ensure_compose() {
+    docker_cmd compose version >/dev/null 2>&1 || die 'Docker Compose v2 plugin is not available.'
+}
+
+validate_compose() {
+    compose_cmd config -q
+}
+
+wait_for_ready() {
+    local deadline=$((SECONDS + 300))
+    while ((SECONDS < deadline)); do
+        if curl -sS --connect-timeout 5 --max-time 5 --output /dev/null "http://127.0.0.1:${APISIX_HTTP_PORT}" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+redact_sensitive_text() {
+    local text="$1" secret
+    for secret in "$NACOS_USERNAME" "$NACOS_PASSWORD" "$APISIX_ADMIN_KEY" "$DASHBOARD_USERNAME" "$DASHBOARD_PASSWORD" "$DASHBOARD_JWT_SECRET"; do
+        [[ -n "$secret" ]] || continue
+        text="${text//"$secret"/[REDACTED]}"
+    done
+    printf '%s' "$text"
+}
+
+show_failure_diagnostics() {
+    local output
+    output="$(compose_cmd ps 2>&1 || true)"
+    [[ -n "$output" ]] && redact_sensitive_text "$output" >&2
+    printf '\n' >&2
+    output="$(compose_cmd logs --tail 100 etcd apisix 2>&1 || true)"
+    [[ -n "$output" ]] && redact_sensitive_text "$output" >&2
+    if [[ "$ENABLE_DASHBOARD" == '1' ]]; then
+        printf '\n' >&2
+        output="$(compose_cmd logs --tail 100 apisix-dashboard 2>&1 || true)"
+        [[ -n "$output" ]] && redact_sensitive_text "$output" >&2
+    fi
+    printf '\n' >&2
+}
+
+show_service_status() {
+    compose_cmd ps
+}
+
+refresh_and_start() {
+    validate_compose
+    compose_cmd up -d --remove-orphans
 }
 
 required_value() {
@@ -498,8 +596,11 @@ write_apisix_config() {
     cat >"$temporary" <<EOF
 apisix:
   node_listen:
-    - port: $APISIX_HTTP_PORT
-    - port: $APISIX_HTTPS_PORT
+    - $APISIX_HTTP_PORT
+  ssl:
+    enable: true
+    listen:
+      - port: $APISIX_HTTPS_PORT
 deployment:
   role: traditional
   role_traditional:
@@ -507,12 +608,13 @@ deployment:
   admin:
     allow_admin:
       - 127.0.0.1/32
+      - 172.16.0.0/12
     admin_listen:
-      host: 0.0.0.0
+      ip: 0.0.0.0
       port: $APISIX_ADMIN_PORT
     admin_key:
       - name: admin
-        key: $APISIX_ADMIN_KEY
+        key: $(yaml_single_quote "$APISIX_ADMIN_KEY")
         role: admin
   etcd:
     host:
@@ -547,11 +649,11 @@ conf:
     endpoints:
       - etcd:2379
 authentication:
-  secret: $DASHBOARD_JWT_SECRET
+  secret: $(yaml_single_quote "$DASHBOARD_JWT_SECRET")
   expire_time: 3600
   users:
-    - username: $DASHBOARD_USERNAME
-      password: $DASHBOARD_PASSWORD
+    - username: $(yaml_single_quote "$DASHBOARD_USERNAME")
+      password: $(yaml_single_quote "$DASHBOARD_PASSWORD")
 EOF
     chmod 600 "$temporary"
     mv -f -- "$temporary" "$DASHBOARD_CONFIG_FILE"
@@ -739,16 +841,31 @@ main() {
     resolve_inputs
     resolve_nacos_credentials
     resolve_dashboard_credentials
+    require_linux
+    require_privileges
+    ensure_docker
+    ensure_compose
     prepare_env
     write_apisix_config
     write_dashboard_config
     write_compose_file
 
+    if ! refresh_and_start; then
+        show_failure_diagnostics
+        die 'APISIX deployment failed to start.'
+    fi
+    if ! wait_for_ready; then
+        show_failure_diagnostics
+        die 'APISIX did not become ready in time.'
+    fi
+
+    show_service_status
     log "Rendered APISIX config: $APISIX_CONFIG_FILE"
     log "Rendered Compose file: $COMPOSE_FILE"
     if [[ "$ENABLE_DASHBOARD" == '1' ]]; then
         log "Rendered Dashboard config: $DASHBOARD_CONFIG_FILE"
     fi
+    log "APISIX is ready at http://127.0.0.1:${APISIX_HTTP_PORT}"
 }
 
 if [[ "${INSTALLER_LIB_ONLY:-0}" != '1' ]]; then

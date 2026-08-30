@@ -70,6 +70,24 @@ declare -F validate_admin_bind >/dev/null \
     || fail 'validate_admin_bind is not implemented'
 declare -F validate_dashboard_credentials >/dev/null \
     || fail 'validate_dashboard_credentials is not implemented'
+declare -F require_linux >/dev/null \
+    || fail 'require_linux is not implemented'
+declare -F require_privileges >/dev/null \
+    || fail 'require_privileges is not implemented'
+declare -F ensure_docker >/dev/null \
+    || fail 'ensure_docker is not implemented'
+declare -F ensure_compose >/dev/null \
+    || fail 'ensure_compose is not implemented'
+declare -F validate_compose >/dev/null \
+    || fail 'validate_compose is not implemented'
+declare -F wait_for_ready >/dev/null \
+    || fail 'wait_for_ready is not implemented'
+declare -F show_failure_diagnostics >/dev/null \
+    || fail 'show_failure_diagnostics is not implemented'
+declare -F show_service_status >/dev/null \
+    || fail 'show_service_status is not implemented'
+declare -F compose_cmd >/dev/null \
+    || fail 'compose_cmd is not implemented'
 declare -F write_apisix_config >/dev/null \
     || fail 'write_apisix_config is not implemented'
 declare -F write_dashboard_config >/dev/null \
@@ -120,6 +138,7 @@ assert_equals "$APISIX_HTTPS_PORT" '9443'
 assert_equals "$APISIX_ADMIN_PORT" '9180'
 assert_equals "$APISIX_ADMIN_BIND" '127.0.0.1'
 assert_equals "$DASHBOARD_PORT" '9000'
+assert_equals "$ENABLE_DASHBOARD" '0'
 
 expect_failure 'unsupported Nacos URL scheme' \
     validate_url 'ftp://nacos.example.test'
@@ -151,10 +170,19 @@ write_apisix_config >>"$render_log" 2>&1
 write_dashboard_config >>"$render_log" 2>&1
 write_compose_file >>"$render_log" 2>&1
 
+assert_contains "$APISIX_CONFIG_FILE" 'node_listen:'
+assert_contains "$APISIX_CONFIG_FILE" '- 9080'
+assert_contains "$APISIX_CONFIG_FILE" 'ssl:'
+assert_contains "$APISIX_CONFIG_FILE" 'listen:'
 assert_contains "$APISIX_CONFIG_FILE" 'prefix: "/nacos/v1/"'
 assert_contains "$APISIX_CONFIG_FILE" 'fetch_interval: 30'
+assert_contains "$APISIX_CONFIG_FILE" 'ip: 0.0.0.0'
+assert_contains "$APISIX_CONFIG_FILE" "key: 'admin.default-key'"
+assert_not_contains "$APISIX_CONFIG_FILE" "key: admin.default-key"
 assert_contains "$COMPOSE_FILE" 'etcd:'
 assert_contains "$COMPOSE_FILE" 'apisix:'
+assert_contains "$COMPOSE_FILE" 'apache/apisix:3.18.0-debian'
+assert_contains "$COMPOSE_FILE" 'quay.io/coreos/etcd:v3.5.18'
 assert_not_contains "$COMPOSE_FILE" 'apisix-dashboard'
 assert_contains "$COMPOSE_FILE" '"9080:9080"'
 assert_contains "$COMPOSE_FILE" '"9443:9443"'
@@ -180,6 +208,7 @@ write_dashboard_config >>"$render_log" 2>&1
 write_compose_file >>"$render_log" 2>&1
 
 assert_contains "$COMPOSE_FILE" 'apisix-dashboard'
+assert_contains "$COMPOSE_FILE" 'apache/apisix-dashboard:3.0.1-alpine'
 assert_contains "$COMPOSE_FILE" '"127.0.0.1:9000:9000"'
 assert_contains "$COMPOSE_FILE" './dashboard-conf.yaml:/usr/local/apisix-dashboard/conf/conf.yaml:ro'
 
@@ -191,12 +220,13 @@ assert_contains "$ENV_FILE" 'DASHBOARD_USERNAME=dashboard-admin'
 assert_contains "$ENV_FILE" 'DASHBOARD_PASSWORD=Dashboard.Pass-123_~!'
 
 assert_contains "$APISIX_CONFIG_FILE" 'nacos-user:Nacos.Pa$$-123_~@nacos.example.test:8848'
-assert_contains "$APISIX_CONFIG_FILE" 'key: Admin.Key-123_~!'
+assert_contains "$APISIX_CONFIG_FILE" "key: 'Admin.Key-123_~!'"
 assert_not_contains "$APISIX_CONFIG_FILE" 'Dashboard.Pass-123_~!'
 assert_not_contains "$APISIX_CONFIG_FILE" 'dashboard-admin'
 
-assert_contains "$DASHBOARD_CONFIG_FILE" 'username: dashboard-admin'
-assert_contains "$DASHBOARD_CONFIG_FILE" 'password: Dashboard.Pass-123_~!'
+assert_contains "$DASHBOARD_CONFIG_FILE" "username: 'dashboard-admin'"
+assert_contains "$DASHBOARD_CONFIG_FILE" "password: 'Dashboard.Pass-123_~!'"
+assert_contains "$DASHBOARD_CONFIG_FILE" "secret: '"
 assert_not_contains "$DASHBOARD_CONFIG_FILE" 'Admin.Key-123_~!'
 assert_not_contains "$DASHBOARD_CONFIG_FILE" 'Nacos.Pa$$-123_~'
 
@@ -210,5 +240,33 @@ assert_not_contains "$render_log" 'Admin.Key-123_~!'
 assert_mode_600 "$ENV_FILE"
 assert_mode_600 "$APISIX_CONFIG_FILE"
 assert_mode_600 "$DASHBOARD_CONFIG_FILE"
+
+compose_trace="$tmp_dir/compose.trace"
+compose_cmd() {
+    printf '%s\n' "$*" >>"$compose_trace"
+}
+
+refresh_and_start
+
+assert_equals "$(tr '\n' '|' <"$compose_trace")" 'config -q|up -d --remove-orphans|'
+
+upsert_env_var "$ENV_FILE" NACOS_SERVER_URL 'http://existing.example.test:8848/nacos'
+upsert_env_var "$ENV_FILE" ENABLE_DASHBOARD '0'
+NACOS_SERVER_URL=''
+ENABLE_DASHBOARD=''
+NACOS_USERNAME=''
+NACOS_PASSWORD=''
+APISIX_ADMIN_KEY=''
+DASHBOARD_USERNAME=''
+DASHBOARD_PASSWORD=''
+DASHBOARD_JWT_SECRET=''
+
+prepare_env
+assert_equals "$NACOS_SERVER_URL" 'http://existing.example.test:8848/nacos'
+assert_equals "$(read_env_value "$ENV_FILE" NACOS_SERVER_URL)" 'http://existing.example.test:8848/nacos'
+
+NACOS_SERVER_URL='http://override.example.test:8848/nacos'
+prepare_env
+assert_equals "$(read_env_value "$ENV_FILE" NACOS_SERVER_URL)" 'http://override.example.test:8848/nacos'
 
 printf 'PASS: install-apisix-nacos contract\n'
