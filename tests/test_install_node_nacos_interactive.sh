@@ -58,6 +58,11 @@ prompt_output="$tmp_dir/prompts.log"
 fingerprint_a="SHA256:$(printf 'a%.0s' {1..64})"
 fingerprint_b="SHA256:$(printf 'b%.0s' {1..64})"
 fingerprint_c="SHA256:$(printf 'c%.0s' {1..64})"
+usage_output="$tmp_dir/usage.txt"
+
+usage >"$usage_output"
+assert_contains "$usage_output" 'Omitted required values are requested interactively.'
+assert_not_contains "$usage_output" '(required'
 
 reset_inputs() {
     MASTER_URL=''
@@ -165,6 +170,19 @@ resolve_nacos_credentials </dev/null 2>"$prompt_output"
 assert_equals "$NACOS_USERNAME" 'stored-user'
 assert_equals "$NACOS_PASSWORD" 'stored-password'
 [[ ! -s "$prompt_output" ]] || fail 'complete stored credentials unexpectedly prompted'
+
+reset_inputs
+cat >"$ENV_FILE" <<'ENV'
+NACOS_USERNAME=
+NACOS_PASSWORD=
+ENV
+if ! (resolve_nacos_credentials </dev/null 2>"$prompt_output"); then
+    cat "$prompt_output" >&2
+    fail 'stored unauthenticated mode was not reused'
+fi
+assert_equals "$NACOS_USERNAME" ''
+assert_equals "$NACOS_PASSWORD" ''
+[[ ! -s "$prompt_output" ]] || fail 'stored unauthenticated mode unexpectedly prompted'
 
 reset_inputs
 resolve_nacos_credentials 2>"$prompt_output" <<'INPUT'

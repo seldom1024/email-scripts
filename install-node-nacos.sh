@@ -417,17 +417,124 @@ read_env_value() {
     ' "$file"
 }
 
+env_file_has_key() {
+    local file="$1"
+    local key="$2"
+    [[ -f "$file" ]] || return 1
+    awk -v key="$key" '
+        BEGIN { assignment = "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" }
+        $0 ~ assignment {
+            found = 1
+            exit
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$file"
+}
+
+validate_nacos_service_name() {
+    validate_nacos_identifier service "$1"
+}
+
+prompt_required_value() {
+    local variable_name="$1"
+    local label="$2"
+    local env_key="$3"
+    local validator="$4"
+    local current default_value='' entered candidate validation_output
+    current="${!variable_name}"
+
+    if [[ -n "$current" ]]; then
+        "$validator" "$current"
+        return 0
+    fi
+    if [[ -n "$env_key" ]]; then
+        default_value="$(read_env_value "$ENV_FILE" "$env_key" || true)"
+    fi
+
+    while true; do
+        if [[ -n "$default_value" ]]; then
+            printf '%s [%s]: ' "$label" "$default_value" >&2
+        else
+            printf '%s: ' "$label" >&2
+        fi
+        IFS= read -r entered || die "输入已结束，未能读取${label}。"
+        candidate="$entered"
+        [[ -n "$candidate" ]] || candidate="$default_value"
+        if [[ -z "$candidate" ]]; then
+            warn "${label}不能为空。"
+            continue
+        fi
+        if validation_output="$("$validator" "$candidate" 2>&1)"; then
+            printf -v "$variable_name" '%s' "$candidate"
+            return 0
+        fi
+        warn "${validation_output#*ERROR: }"
+    done
+}
+
+resolve_install_inputs() {
+    prompt_required_value MASTER_URL '主节点地址' MASTER_URL validate_master_url
+    MASTER_URL="$(normalize_master_url "$MASTER_URL")"
+    prompt_required_value NODE_ID '节点 ID' '' validate_node_id
+    prompt_required_value MASTER_FINGERPRINT '主节点指纹' '' validate_master_fingerprint
+    prompt_required_value NACOS_SERVER_URL 'Nacos 地址' NACOS_SERVER_URL validate_nacos_url
+    NACOS_SERVER_URL="$(normalize_nacos_url "$NACOS_SERVER_URL")"
+    prompt_required_value NACOS_SERVICE_NAME 'Nacos 服务名' NACOS_SERVICE_NAME validate_nacos_service_name
+    prompt_required_value NACOS_ADVERTISE_IP '注册 IP' NACOS_ADVERTISE_IP validate_ipv4
+}
+
 resolve_nacos_credentials() {
-    local existing_username existing_password
+    local existing_username existing_password validation_output
+    local username_key_present=0 password_key_present=0
     if [[ -n "$NACOS_USERNAME" || -n "$NACOS_PASSWORD" ]]; then
         validate_nacos_credentials
         return 0
     fi
     existing_username="$(read_env_value "$ENV_FILE" NACOS_USERNAME || true)"
     existing_password="$(read_env_value "$ENV_FILE" NACOS_PASSWORD || true)"
-    NACOS_USERNAME="$existing_username"
-    NACOS_PASSWORD="$existing_password"
-    validate_nacos_credentials
+    env_file_has_key "$ENV_FILE" NACOS_USERNAME && username_key_present=1
+    env_file_has_key "$ENV_FILE" NACOS_PASSWORD && password_key_present=1
+    if ((username_key_present || password_key_present)); then
+        ((username_key_present && password_key_present)) \
+            || die 'NACOS_USERNAME and NACOS_PASSWORD must be provided together.'
+        NACOS_USERNAME="$existing_username"
+        NACOS_PASSWORD="$existing_password"
+        validate_nacos_credentials
+        return 0
+    fi
+
+    while true; do
+        printf 'Nacos 用户名（直接回车表示无需认证）: ' >&2
+        IFS= read -r NACOS_USERNAME \
+            || die '输入已结束，未能读取 Nacos 用户名。'
+        NACOS_PASSWORD=''
+        if [[ -z "$NACOS_USERNAME" ]]; then
+            return 0
+        fi
+        if ! validation_output="$(validate_env_value NACOS_USERNAME "$NACOS_USERNAME" 2>&1)"; then
+            warn "${validation_output#*ERROR: }"
+            NACOS_USERNAME=''
+            continue
+        fi
+
+        while true; do
+            printf 'Nacos 密码: ' >&2
+            if ! IFS= read -r -s NACOS_PASSWORD; then
+                printf '\n' >&2
+                die '输入已结束，未能读取 Nacos 密码。'
+            fi
+            printf '\n' >&2
+            if [[ -z "$NACOS_PASSWORD" ]]; then
+                warn 'Nacos 密码不能为空。'
+                continue
+            fi
+            if validation_output="$(validate_nacos_credentials 2>&1)"; then
+                return 0
+            fi
+            warn "${validation_output#*ERROR: }"
+            NACOS_PASSWORD=''
+        done
+    done
 }
 
 upsert_env_var() {
@@ -946,22 +1053,27 @@ print_summary() {
 
 usage() {
     cat <<'USAGE'
-Usage: install-node-nacos.sh --master URL --node-id ID --master-fingerprint FINGERPRINT --nacos-url URL --nacos-service NAME --advertise-ip IPv4 [options]
+Usage: install-node-nacos.sh [--master URL] [--node-id ID] [--master-fingerprint FINGERPRINT] [--nacos-url URL] [--nacos-service NAME] [--advertise-ip IPv4] [options]
 
 Install or repair Docker and Docker Compose, persist replica-local configuration,
 enroll the replica when needed, and start it with a Nacos registration sidecar.
+
+Omitted required values are requested interactively. Existing deployment values
+from .env are shown as defaults where available; press Enter to reuse them.
 
 The default install directory is the current working directory.
 --v VERSION selects the email image tag (default: latest).
 --n CONTAINER_NAME selects the replica container name (default: outlook-mail-reader).
 --p PORT selects the host port mapped to container port 5000 (default: 5000).
---nacos-url URL sets the Nacos server URL (required; optional /nacos suffix).
---nacos-service NAME sets the Nacos service name (required).
---advertise-ip IPv4 sets the exact address registered in Nacos (required).
+--nacos-url URL sets the Nacos server URL (optional /nacos suffix; prompted if omitted).
+--nacos-service NAME sets the Nacos service name (prompted if omitted).
+--advertise-ip IPv4 sets the exact address registered in Nacos (prompted if omitted).
 --nacos-namespace ID sets the namespace (default: public).
 --nacos-group NAME sets the group (default: DEFAULT_GROUP).
 --nacos-cluster NAME sets the cluster (default: DEFAULT).
-Set NACOS_USERNAME and NACOS_PASSWORD together in the process environment when authentication is required.
+Set NACOS_USERNAME and NACOS_PASSWORD together in the process environment for
+unattended authenticated installs. Otherwise credentials are reused from .env or
+requested interactively; press Enter at the username prompt for no authentication.
 --project-dir is retained as an alias for --install-dir.
 USAGE
 }
@@ -1047,27 +1159,13 @@ main() {
         esac
     done
 
-    [[ -n "$MASTER_URL" ]] || die '--master is required.'
-    [[ -n "$NODE_ID" ]] || die '--node-id is required.'
-    [[ -n "$MASTER_FINGERPRINT" ]] || die '--master-fingerprint is required.'
-    [[ -n "$NACOS_SERVER_URL" ]] || die '--nacos-url is required.'
-    [[ -n "$NACOS_SERVICE_NAME" ]] || die '--nacos-service is required.'
-    [[ -n "$NACOS_ADVERTISE_IP" ]] || die '--advertise-ip is required.'
-    validate_master_url "$MASTER_URL"
-    MASTER_URL="$(normalize_master_url "$MASTER_URL")"
-    validate_node_id "$NODE_ID"
-    validate_master_fingerprint "$MASTER_FINGERPRINT"
-    validate_nacos_url "$NACOS_SERVER_URL"
-    NACOS_SERVER_URL="$(normalize_nacos_url "$NACOS_SERVER_URL")"
-    validate_nacos_identifier service "$NACOS_SERVICE_NAME"
-    validate_ipv4 "$NACOS_ADVERTISE_IP"
-    validate_nacos_identifier namespace "$NACOS_NAMESPACE_ID"
-    validate_nacos_identifier group "$NACOS_GROUP_NAME"
-    validate_nacos_identifier cluster "$NACOS_CLUSTER_NAME"
-
     if [[ -n "$project_dir_arg" ]]; then
         set_project_dir "$project_dir_arg"
     fi
+    resolve_install_inputs
+    validate_nacos_identifier namespace "$NACOS_NAMESPACE_ID"
+    validate_nacos_identifier group "$NACOS_GROUP_NAME"
+    validate_nacos_identifier cluster "$NACOS_CLUSTER_NAME"
     resolve_nacos_credentials
 
     require_linux_systemd
