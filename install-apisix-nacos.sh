@@ -662,7 +662,7 @@ EOF
 
 write_compose_file() {
     local temporary dashboard_block=''
-    mkdir -p "$DATA_DIR"
+    mkdir -p "$ETCD_DATA_DIR"
     temporary="$(mktemp "$PROJECT_DIR/.docker-compose.yml.tmp.XXXXXX")"
     if [[ "$ENABLE_DASHBOARD" == '1' ]]; then
         dashboard_block=$(cat <<EOF
