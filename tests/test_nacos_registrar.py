@@ -94,26 +94,20 @@ class NacosHandler(BaseHTTPRequestHandler):
         self.recorder.add(method, path, params, authorization)
         return path, params, authorization
 
-    def _send_result(self, code=0, message='success', data='ok'):
-        self._send(
-            200,
-            json.dumps(
-                {'code': code, 'message': message, 'data': data}
-            ).encode(),
-            'application/json',
-        )
-
     def _authorized(self, params, authorization):
-        if 'accessToken' in params:
-            return False
         return (
             not self.recorder.auth_required
-            or authorization.startswith('Bearer test-token-')
+            or (
+                not authorization
+                and params.get('accessToken', [''])[0].startswith(
+                    'test-token-'
+                )
+            )
         )
 
     def do_POST(self):
         path, params, authorization = self._record_request('POST')
-        if path == '/nacos/v3/auth/user/login':
+        if path == '/nacos/v1/auth/users/login':
             self.recorder.login_count += 1
             token = f'test-token-{self.recorder.login_count}'
             self._send(200, json.dumps({'accessToken': token}).encode(), 'application/json')
@@ -121,37 +115,46 @@ class NacosHandler(BaseHTTPRequestHandler):
         if not self._authorized(params, authorization):
             self._send(403, b'forbidden')
             return
-        if path != '/nacos/v3/client/ns/instance':
+        if path != '/nacos/v1/ns/instance':
             self._send(404, b'not found')
             return
-        heartbeat = params.get('heartBeat') == ['true']
-        if heartbeat and self.recorder.reject_next_heartbeat:
-            self.recorder.reject_next_heartbeat = False
-            self._send(401, b'expired')
-            return
-        if heartbeat and self.recorder.missing_next_heartbeat:
-            self.recorder.missing_next_heartbeat = False
-            self._send_result(21003, 'instance not found', None)
-            return
-        if not heartbeat and self.recorder.fail_register_count:
+        if self.recorder.fail_register_count:
             self.recorder.fail_register_count -= 1
             self._send(500, b'unavailable')
             return
-        self._send_result()
+        self._send()
 
     def do_PUT(self):
-        self._record_request('PUT')
-        self._send(405, b'method not allowed')
+        path, params, authorization = self._record_request('PUT')
+        if path != '/nacos/v1/ns/instance/beat':
+            self._send(404, b'not found')
+            return
+        if self.recorder.reject_next_heartbeat:
+            self.recorder.reject_next_heartbeat = False
+            self._send(401, b'expired')
+            return
+        if not self._authorized(params, authorization):
+            self._send(403, b'forbidden')
+            return
+        if self.recorder.missing_next_heartbeat:
+            self.recorder.missing_next_heartbeat = False
+            self._send(
+                200,
+                json.dumps({'code': '20404'}).encode(),
+                'application/json',
+            )
+            return
+        self._send()
 
     def do_DELETE(self):
         path, params, authorization = self._record_request('DELETE')
         if not self._authorized(params, authorization):
             self._send(403, b'forbidden')
             return
-        if path != '/nacos/v3/client/ns/instance':
+        if path != '/nacos/v1/ns/instance':
             self._send(404, b'not found')
             return
-        self._send_result()
+        self._send()
 
     def log_message(self, *_args):
         pass
@@ -231,51 +234,28 @@ class RegistrarLifecycleTest(unittest.TestCase):
         )
 
     def test_lifecycle_refreshes_auth_and_tracks_readiness(self):
-        login_path = '/nacos/v3/auth/user/login'
-        instance_path = '/nacos/v3/client/ns/instance'
-        register_params = {'heartBeat': 'false'}
-        heartbeat_params = {'heartBeat': 'true'}
+        login_path = '/nacos/v1/auth/users/login'
+        instance_path = '/nacos/v1/ns/instance'
+        beat_path = '/nacos/v1/ns/instance/beat'
         self.assert_request('POST', login_path)
-        self.assert_request('POST', instance_path, register_params, count=2)
+        self.assert_request('POST', instance_path, count=2)
 
-        heartbeat_count = self.recorder.count_matching(
-            'POST', instance_path, heartbeat_params
-        )
+        heartbeat_count = self.recorder.count_matching('PUT', beat_path)
         self.recorder.reject_next_heartbeat = True
         self.assert_request('POST', login_path, count=2)
-        self.assert_request(
-            'POST',
-            instance_path,
-            heartbeat_params,
-            count=heartbeat_count + 2,
-        )
+        self.assert_request('PUT', beat_path, count=heartbeat_count + 2)
 
-        register_count = self.recorder.count_matching(
-            'POST', instance_path, register_params
-        )
-        heartbeat_count = self.recorder.count_matching(
-            'POST', instance_path, heartbeat_params
-        )
+        register_count = self.recorder.count_matching('POST', instance_path)
+        heartbeat_count = self.recorder.count_matching('PUT', beat_path)
         self.recorder.missing_next_heartbeat = True
-        self.assert_request(
-            'POST',
-            instance_path,
-            heartbeat_params,
-            count=heartbeat_count + 1,
-        )
-        self.assert_request(
-            'POST', instance_path, register_params, count=register_count + 1
-        )
+        self.assert_request('PUT', beat_path, count=heartbeat_count + 1)
+        self.assert_request('POST', instance_path, count=register_count + 1)
 
         self.recorder.ready = False
         self.assert_request('DELETE', instance_path)
-        register_count = self.recorder.count_matching(
-            'POST', instance_path, register_params
-        )
+        register_count = self.recorder.count_matching('POST', instance_path)
         self.recorder.ready = True
-        self.assert_request(
-            'POST', instance_path, register_params, count=register_count + 1
-        )
+        self.assert_request('POST', instance_path, count=register_count + 1)
 
         self.stop_process()
         self.assert_request('DELETE', instance_path, count=2)
@@ -287,7 +267,7 @@ class RegistrarLifecycleTest(unittest.TestCase):
             for method, path, params, _authorization in self.recorder.requests
             if method == 'POST'
             and path == instance_path
-            and params.get('heartBeat') == ['false']
+            and 'weight' in params
         )
         self.assertEqual(register['serviceName'], ['outlook-email'])
         self.assertEqual(register['ip'], ['198.51.100.24'])
@@ -316,20 +296,15 @@ class RegistrarLifecycleTest(unittest.TestCase):
         heartbeat = next(
             params
             for method, path, params, _authorization in self.recorder.requests
-            if method == 'POST'
-            and path == instance_path
-            and params.get('heartBeat') == ['true']
+            if method == 'PUT' and path == beat_path
         )
-        for key in (
-            'serviceName',
-            'ip',
-            'port',
-            'ephemeral',
-            'namespaceId',
-            'groupName',
-            'clusterName',
-        ):
-            self.assertEqual(heartbeat[key], register[key])
+        beat = json.loads(heartbeat['beat'][0])
+        self.assertEqual(heartbeat['namespaceId'], register['namespaceId'])
+        self.assertEqual(heartbeat['groupName'], register['groupName'])
+        self.assertEqual(beat['serviceName'], register['serviceName'][0])
+        self.assertEqual(beat['ip'], register['ip'][0])
+        self.assertEqual(str(beat['port']), register['port'][0])
+        self.assertEqual(beat['cluster'], register['clusterName'][0])
 
         instance_requests = [
             request
@@ -339,27 +314,24 @@ class RegistrarLifecycleTest(unittest.TestCase):
         self.assertTrue(instance_requests)
         self.assertTrue(
             all(
-                authorization.startswith('Bearer test-token-')
-                for _method, _path, _params, authorization
+                not authorization and 'accessToken' in params
+                for _method, _path, params, authorization
                 in instance_requests
             )
         )
         self.assertTrue(
             all(
-                'accessToken' not in params
+                'accessToken' in params
                 for _method, _path, params, _authorization
-                in self.recorder.requests
+                in instance_requests
             )
         )
-        self.assertFalse(
-            any(method == 'PUT' for method, *_rest in self.recorder.requests)
-        )
-
     def test_unauthenticated_lifecycle(self):
-        login_path = '/nacos/v3/auth/user/login'
-        instance_path = '/nacos/v3/client/ns/instance'
-        self.assert_request('POST', instance_path, {'heartBeat': 'false'})
-        self.assert_request('POST', instance_path, {'heartBeat': 'true'})
+        login_path = '/nacos/v1/auth/users/login'
+        instance_path = '/nacos/v1/ns/instance'
+        beat_path = '/nacos/v1/ns/instance/beat'
+        self.assert_request('POST', instance_path)
+        self.assert_request('PUT', beat_path)
         self.assertEqual(
             self.recorder.count_matching('POST', login_path), 0
         )
@@ -367,8 +339,8 @@ class RegistrarLifecycleTest(unittest.TestCase):
         self.assert_request('DELETE', instance_path)
         self.assertTrue(
             all(
-                not authorization
-                for _method, _path, _params, authorization
+                not authorization and 'accessToken' not in params
+                for _method, _path, params, authorization
                 in self.recorder.requests
             )
         )

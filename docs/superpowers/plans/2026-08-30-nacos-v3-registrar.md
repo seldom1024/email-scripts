@@ -1,5 +1,10 @@
 # Nacos 3 Registrar Implementation Plan
 
+> Superseded: The deployment now targets Nacos 2.x for compatibility with
+> Apache APISIX's built-in Nacos discovery. The current registrar uses the
+> Nacos v1-compatible HTTP lifecycle; this plan is retained as historical
+> implementation context.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the generated registrar's Nacos v1 lifecycle with authenticated and unauthenticated Nacos 3 client Open API behavior.

@@ -1,5 +1,10 @@
 # Nacos 3 Registrar Design
 
+> Superseded: The deployment now targets Nacos 2.x for compatibility with
+> Apache APISIX's built-in Nacos discovery. The current registrar uses the
+> Nacos v1-compatible HTTP lifecycle; this document is retained as the
+> historical Nacos 3 evaluation.
+
 ## Goal
 
 Replace the generated registrar's Nacos v1 HTTP lifecycle with the Nacos 3 client Open API so replica nodes can register against the deployed Nacos 3 server without changing the third-party business image.
