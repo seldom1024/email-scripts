@@ -211,4 +211,3 @@ Run `git diff ab07afb..HEAD -- install-node-nacos.sh tests` and `git status --sh
 - [ ] **Step 4: Merge, verify on master, and push**
 
 Fast-forward `master` to `feature/nacos-v3-registrar`, rerun Task 3 Steps 1 and 2 from the main worktree, then push with `git push origin master` only if the remote has not diverged. Remove the clean worktree and merged feature branch after the remote branch points at the verified commit.
-

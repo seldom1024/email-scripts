@@ -655,7 +655,31 @@ class Config:
             raise ValueError("NACOS_RETRY_INITIAL cannot exceed NACOS_RETRY_MAX")
 
 
+class NacosResultError(RuntimeError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(f"Nacos API result code {code}")
+
+
+def decode_result_code(body):
+    try:
+        payload = json.loads(body.decode("utf-8"))
+        return int(payload["code"])
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        raise RuntimeError(
+            "Nacos response was not a valid result envelope"
+        ) from None
+
+
 class NacosRegistrar:
+    INSTANCE_PATH = "/nacos/v3/client/ns/instance"
+
     def __init__(self, config):
         self.config = config
         self.access_token = None
@@ -665,10 +689,12 @@ class NacosRegistrar:
     def stop(self, _signum=None, _frame=None):
         self.stop_event.set()
 
-    def _perform(self, method, path, params):
+    def _perform(self, method, path, params, access_token=None):
         url = f"{self.config.api_root}{path}"
         data = None
         headers = {"Accept": "application/json"}
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
         if method in ("GET", "DELETE"):
             query = urllib.parse.urlencode(params)
             if query:
@@ -687,7 +713,7 @@ class NacosRegistrar:
     def _login(self):
         body = self._perform(
             "POST",
-            "/nacos/v1/auth/users/login",
+            "/nacos/v3/auth/user/login",
             {
                 "username": self.config.username,
                 "password": self.config.password,
@@ -701,13 +727,13 @@ class NacosRegistrar:
 
     def _request(self, method, path, params):
         for attempt in range(2):
-            request_params = dict(params)
             if self.config.username:
                 if not self.access_token:
                     self._login()
-                request_params["accessToken"] = self.access_token
             try:
-                return self._perform(method, path, request_params)
+                return self._perform(
+                    method, path, params, self.access_token
+                )
             except urllib.error.HTTPError as error:
                 if (
                     error.code in (401, 403)
@@ -735,12 +761,17 @@ class NacosRegistrar:
         params = self._instance_params()
         params.update(
             {
+                "heartBeat": "false",
                 "weight": "1.0",
                 "enabled": "true",
                 "healthy": "true",
             }
         )
-        self._request("POST", "/nacos/v1/ns/instance", params)
+        code = decode_result_code(
+            self._request("POST", self.INSTANCE_PATH, params)
+        )
+        if code != 0:
+            raise NacosResultError(code)
         self.registered = True
         LOG.info(
             "Registered %s at %s:%s",
@@ -750,41 +781,25 @@ class NacosRegistrar:
         )
 
     def heartbeat(self):
-        beat = {
-            "serviceName": self.config.service_name,
-            "groupName": self.config.group_name,
-            "cluster": self.config.cluster_name,
-            "ip": self.config.ip,
-            "port": self.config.port,
-            "weight": 1.0,
-            "ephemeral": True,
-        }
-        body = self._request(
-            "PUT",
-            "/nacos/v1/ns/instance/beat",
-            {
-                "serviceName": self.config.service_name,
-                "groupName": self.config.group_name,
-                "namespaceId": self.config.namespace_id,
-                "ephemeral": "true",
-                "beat": json.dumps(beat, separators=(",", ":")),
-            },
+        params = self._instance_params()
+        params["heartBeat"] = "true"
+        code = decode_result_code(
+            self._request("POST", self.INSTANCE_PATH, params)
         )
-        try:
-            response = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            response = None
-        if (
-            isinstance(response, dict)
-            and str(response.get("code")) == "20404"
-        ):
+        if code == 21003:
             self.registered = False
             self.register()
+        elif code != 0:
+            raise NacosResultError(code)
 
     def deregister(self):
-        self._request(
-            "DELETE", "/nacos/v1/ns/instance", self._instance_params()
+        code = decode_result_code(
+            self._request(
+                "DELETE", self.INSTANCE_PATH, self._instance_params()
+            )
         )
+        if code != 0:
+            raise NacosResultError(code)
         self.registered = False
         LOG.info(
             "Deregistered %s at %s:%s",
@@ -809,6 +824,8 @@ class NacosRegistrar:
     def _error_label(error):
         if isinstance(error, urllib.error.HTTPError):
             return f"HTTP {error.code}"
+        if isinstance(error, NacosResultError):
+            return str(error)
         return type(error).__name__
 
     def run(self):
