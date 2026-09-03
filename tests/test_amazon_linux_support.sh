@@ -143,6 +143,8 @@ run_contract_for_installer() (
     TEST_ARCH=x86_64
     AVAILABLE_PACKAGE_MANAGER=dnf
     HOST_TOOLS_MISSING=0
+    PACKAGE_INSTALL_FAILS=0
+    CHECKSUM_MATCHES=1
     : >"$command_log"
     docker_cmd() {
         if [[ "${1:-}" == compose && "${2:-}" == version ]]; then
@@ -152,7 +154,7 @@ run_contract_for_installer() (
         return 0
     }
     curl() {
-        local argument output_file=''
+        local argument output_file='' url='' binary_hash
         printf 'curl %s\n' "$*" >>"$command_log"
         while (($#)); do
             argument="$1"
@@ -161,13 +163,29 @@ run_contract_for_installer() (
                 (($#)) || fail "$installer curl stub received no output path"
                 output_file="$1"
                 shift
+            else
+                url="$argument"
             fi
         done
-        [[ -n "$output_file" ]] || fail "$installer must download Compose to a temporary file"
-        printf 'compose-binary\n' >"$output_file"
+        [[ -n "$output_file" ]] || fail "$installer curl stub received no output path"
+        if [[ "$url" == */checksums.txt ]]; then
+            binary_hash="$(printf 'compose-binary\n' | sha256sum | awk '{print $1}')"
+            if ((CHECKSUM_MATCHES == 0)); then
+                binary_hash='0000000000000000000000000000000000000000000000000000000000000000'
+            fi
+            printf '%s *docker-compose-linux-x86_64\n' "$binary_hash" >"$output_file"
+            printf '%s *docker-compose-linux-aarch64\n' "$binary_hash" >>"$output_file"
+        else
+            printf 'compose-binary\n' >"$output_file"
+        fi
     }
     run_root() {
         printf '%s\n' "$*" >>"$command_log"
+        if ((PACKAGE_INSTALL_FAILS == 1)) \
+            && [[ "${1:-}" == dnf || "${1:-}" == yum ]] \
+            && [[ "${2:-}" == install && "${4:-}" == docker-compose-plugin ]]; then
+            return 1
+        fi
     }
 
     ensure_compose amzn
@@ -177,20 +195,42 @@ run_contract_for_installer() (
     assert_contains "$output" \
         "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64" \
         "$installer must download the x86_64 official Compose plugin"
+    assert_contains "$output" \
+        "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/checksums.txt" \
+        "$installer must download the official Compose checksums"
     assert_contains "$output" 'install -m 0755' \
         "$installer must install the Compose plugin executable"
     assert_contains "$output" '/usr/local/lib/docker/cli-plugins/docker-compose' \
         "$installer must use the system-wide Compose plugin path"
 
     TEST_ARCH=aarch64
+    AVAILABLE_PACKAGE_MANAGER=yum
+    PACKAGE_INSTALL_FAILS=1
     : >"$command_log"
     ensure_compose amzn
     output="$(<"$command_log")"
+    assert_contains "$output" 'yum install -y docker-compose-plugin' \
+        "$installer must try the native Compose package with yum"
     assert_contains "$output" \
         "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-linux-aarch64" \
-        "$installer must download the aarch64 official Compose plugin"
+        "$installer must fall back to the aarch64 Compose binary when the native package fails"
+
+    TEST_ARCH=x86_64
+    PACKAGE_INSTALL_FAILS=0
+    CHECKSUM_MATCHES=0
+    : >"$command_log"
+    if output="$(install_compose_plugin_binary 2>&1)"; then
+        fail "$installer must reject a Compose binary with a mismatched checksum"
+    fi
+    assert_contains "$output" 'checksum verification failed' \
+        "$installer must explain a Compose checksum mismatch"
+    assert_not_contains "$(<"$command_log")" 'install -d -m 0755' \
+        "$installer must not create the root plugin directory after a checksum mismatch"
+    assert_not_contains "$(<"$command_log")" 'install -m 0755' \
+        "$installer must not install a Compose binary after a checksum mismatch"
 
     TEST_ARCH=s390x
+    CHECKSUM_MATCHES=1
     : >"$command_log"
     if output="$(install_compose_plugin_binary 2>&1)"; then
         fail "$installer must not install Compose for an unsupported architecture"

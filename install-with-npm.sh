@@ -162,16 +162,37 @@ docker_compose_arch() {
 }
 
 install_compose_plugin_binary() (
-    local architecture plugin_dir plugin_path temporary url
+    local actual_checksum architecture binary_name binary_url checksums checksums_url
+    local expected_checksum plugin_dir plugin_path release_url temporary
     [[ "$DOCKER_COMPOSE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
         || die 'DOCKER_COMPOSE_VERSION must use the form vMAJOR.MINOR.PATCH.'
     architecture="$(docker_compose_arch)" || return $?
     plugin_dir='/usr/local/lib/docker/cli-plugins'
     plugin_path="$plugin_dir/docker-compose"
-    url="https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${architecture}"
+    binary_name="docker-compose-linux-${architecture}"
+    release_url="https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}"
+    binary_url="$release_url/$binary_name"
+    checksums_url="$release_url/checksums.txt"
     temporary="$(mktemp)"
-    trap 'rm -f -- "$temporary"' EXIT
-    curl -fL --retry 3 --connect-timeout 10 --output "$temporary" "$url"
+    checksums="$(mktemp)"
+    trap 'rm -f -- "$temporary" "$checksums"' EXIT
+    curl -fL --retry 3 --connect-timeout 10 --output "$temporary" "$binary_url"
+    curl -fL --retry 3 --connect-timeout 10 --output "$checksums" "$checksums_url"
+    expected_checksum="$(awk -v binary="$binary_name" '
+        {
+            filename = $2
+            sub(/^\*/, "", filename)
+            if (filename == binary) {
+                print $1
+                exit
+            }
+        }
+    ' "$checksums")"
+    [[ "$expected_checksum" =~ ^[[:xdigit:]]{64}$ ]] \
+        || die "No valid checksum found for $binary_name."
+    actual_checksum="$(sha256sum "$temporary" | awk '{print $1}')"
+    [[ "${actual_checksum,,}" == "${expected_checksum,,}" ]] \
+        || die 'Docker Compose checksum verification failed.'
     run_root install -d -m 0755 "$plugin_dir"
     run_root install -m 0755 "$temporary" "$plugin_path"
 )
