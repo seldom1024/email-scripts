@@ -114,6 +114,89 @@ run_contract_for_installer() (
     output="$(<"$command_log")"
     assert_contains "$output" 'yum install -y ca-certificates curl openssl' \
         "$installer must install missing host tools with yum"
+
+    declare -F docker_compose_arch >/dev/null \
+        || fail "$installer must define docker_compose_arch"
+    declare -F install_compose_plugin_binary >/dev/null \
+        || fail "$installer must define install_compose_plugin_binary"
+
+    TEST_ARCH=x86_64
+    machine_architecture() { printf '%s\n' "$TEST_ARCH"; }
+    assert_equals "$(docker_compose_arch)" x86_64 \
+        "$installer must support x86_64 Compose binaries"
+    TEST_ARCH=amd64
+    assert_equals "$(docker_compose_arch)" x86_64 \
+        "$installer must normalize amd64 Compose binaries"
+    TEST_ARCH=aarch64
+    assert_equals "$(docker_compose_arch)" aarch64 \
+        "$installer must support aarch64 Compose binaries"
+    TEST_ARCH=arm64
+    assert_equals "$(docker_compose_arch)" aarch64 \
+        "$installer must normalize arm64 Compose binaries"
+    TEST_ARCH=s390x
+    if output="$(docker_compose_arch 2>&1)"; then
+        fail "$installer must reject unsupported Compose architectures"
+    fi
+    assert_contains "$output" 'Unsupported architecture' \
+        "$installer must explain unsupported Compose architectures"
+
+    TEST_ARCH=x86_64
+    AVAILABLE_PACKAGE_MANAGER=dnf
+    HOST_TOOLS_MISSING=0
+    : >"$command_log"
+    docker_cmd() {
+        if [[ "${1:-}" == compose && "${2:-}" == version ]]; then
+            grep -q '/usr/local/lib/docker/cli-plugins/docker-compose' "$command_log"
+            return
+        fi
+        return 0
+    }
+    curl() {
+        local argument output_file=''
+        printf 'curl %s\n' "$*" >>"$command_log"
+        while (($#)); do
+            argument="$1"
+            shift
+            if [[ "$argument" == '--output' || "$argument" == '-o' ]]; then
+                (($#)) || fail "$installer curl stub received no output path"
+                output_file="$1"
+                shift
+            fi
+        done
+        [[ -n "$output_file" ]] || fail "$installer must download Compose to a temporary file"
+        printf 'compose-binary\n' >"$output_file"
+    }
+    run_root() {
+        printf '%s\n' "$*" >>"$command_log"
+    }
+
+    ensure_compose amzn
+    output="$(<"$command_log")"
+    assert_contains "$output" 'dnf install -y docker-compose-plugin' \
+        "$installer must try the native Compose package first"
+    assert_contains "$output" \
+        "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64" \
+        "$installer must download the x86_64 official Compose plugin"
+    assert_contains "$output" 'install -m 0755' \
+        "$installer must install the Compose plugin executable"
+    assert_contains "$output" '/usr/local/lib/docker/cli-plugins/docker-compose' \
+        "$installer must use the system-wide Compose plugin path"
+
+    TEST_ARCH=aarch64
+    : >"$command_log"
+    ensure_compose amzn
+    output="$(<"$command_log")"
+    assert_contains "$output" \
+        "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-linux-aarch64" \
+        "$installer must download the aarch64 official Compose plugin"
+
+    TEST_ARCH=s390x
+    : >"$command_log"
+    if output="$(install_compose_plugin_binary 2>&1)"; then
+        fail "$installer must not install Compose for an unsupported architecture"
+    fi
+    assert_not_contains "$(<"$command_log")" 'curl ' \
+        "$installer must reject unsupported architecture before download"
 )
 
 installers=(

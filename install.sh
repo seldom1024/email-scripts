@@ -11,6 +11,8 @@ readonly MIN_PORT=1024
 readonly MAX_PORT=65535
 readonly HEALTHCHECK_TIMEOUT_SECONDS="${HEALTHCHECK_TIMEOUT_SECONDS:-60}"
 readonly HEALTHCHECK_INTERVAL_SECONDS="${HEALTHCHECK_INTERVAL_SECONDS:-2}"
+readonly DEFAULT_DOCKER_COMPOSE_VERSION='v2.40.3'
+DOCKER_COMPOSE_VERSION="${DOCKER_COMPOSE_VERSION:-$DEFAULT_DOCKER_COMPOSE_VERSION}"
 
 log() { printf '[outlook-email] %s\n' "$*"; }
 warn() { printf '[outlook-email] WARNING: %s\n' "$*" >&2; }
@@ -168,6 +170,35 @@ amazon_linux_install_docker() {
     run_root "$package_manager" install -y ca-certificates curl openssl docker
 }
 
+machine_architecture() {
+    uname -m
+}
+
+docker_compose_arch() {
+    local architecture
+    architecture="$(machine_architecture)"
+    case "$architecture" in
+        x86_64|amd64) printf '%s\n' x86_64 ;;
+        aarch64|arm64) printf '%s\n' aarch64 ;;
+        *) die "Unsupported architecture for Docker Compose: $architecture." ;;
+    esac
+}
+
+install_compose_plugin_binary() (
+    local architecture plugin_dir plugin_path temporary url
+    [[ "$DOCKER_COMPOSE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+        || die 'DOCKER_COMPOSE_VERSION must use the form vMAJOR.MINOR.PATCH.'
+    architecture="$(docker_compose_arch)" || return $?
+    plugin_dir='/usr/local/lib/docker/cli-plugins'
+    plugin_path="$plugin_dir/docker-compose"
+    url="https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${architecture}"
+    temporary="$(mktemp)"
+    trap 'rm -f -- "$temporary"' EXIT
+    curl -fL --retry 3 --connect-timeout 10 --output "$temporary" "$url"
+    run_root install -d -m 0755 "$plugin_dir"
+    run_root install -m 0755 "$temporary" "$plugin_path"
+)
+
 install_docker() {
     local distro="$1"
     case "$distro" in
@@ -255,6 +286,19 @@ ensure_compose() {
                 else
                     die 'Neither dnf nor yum is available to install Docker Compose Plugin.'
                 fi
+                ;;
+            amzn)
+                local package_manager
+                package_manager="$(amazon_linux_package_manager)"
+                if run_root "$package_manager" install -y docker-compose-plugin; then
+                    if docker_cmd compose version >/dev/null 2>&1; then
+                        return 0
+                    fi
+                    warn 'The native docker-compose-plugin package did not provide Docker Compose; using the official plugin binary.'
+                else
+                    warn 'docker-compose-plugin is unavailable from the Amazon Linux repository; using the official plugin binary.'
+                fi
+                install_compose_plugin_binary
                 ;;
             *)
                 die "Unsupported distribution: $distro"
