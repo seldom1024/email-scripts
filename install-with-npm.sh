@@ -73,11 +73,11 @@ detect_os() {
     local distro_id="${ID:-}"
     distro_id="${distro_id//$'\r'/}"
     case "${distro_id,,}" in
-        ubuntu|debian|centos|rhel|rocky|almalinux)
+        ubuntu|debian|centos|rhel|rocky|almalinux|amzn)
             printf '%s\n' "${distro_id,,}"
             ;;
         *)
-            die "Unsupported Linux distribution: ${distro_id:-unknown}. Supported: Ubuntu, Debian, CentOS, RHEL, Rocky Linux, AlmaLinux."
+            die "Unsupported Linux distribution: ${distro_id:-unknown}. Supported: Ubuntu, Debian, CentOS, RHEL, Rocky Linux, AlmaLinux, Amazon Linux."
             ;;
     esac
 }
@@ -129,6 +129,22 @@ rpm_install_docker() {
     fi
 }
 
+amazon_linux_package_manager() {
+    if command -v dnf >/dev/null 2>&1; then
+        printf '%s\n' dnf
+    elif command -v yum >/dev/null 2>&1; then
+        printf '%s\n' yum
+    else
+        die 'Neither dnf nor yum is available on this Amazon Linux system.'
+    fi
+}
+
+amazon_linux_install_docker() {
+    local package_manager
+    package_manager="$(amazon_linux_package_manager)"
+    run_root "$package_manager" install -y ca-certificates curl openssl docker
+}
+
 install_docker() {
     local distro="$1"
     case "$distro" in
@@ -143,6 +159,9 @@ install_docker() {
             else
                 die 'Neither dnf nor yum is available on this CentOS-family system.'
             fi
+            ;;
+        amzn)
+            amazon_linux_install_docker
             ;;
         *)
             die "Unsupported distribution: $distro"
@@ -171,6 +190,11 @@ ensure_host_tools() {
             else
                 die 'Neither dnf nor yum is available to install required host tools.'
             fi
+            ;;
+        amzn)
+            local package_manager
+            package_manager="$(amazon_linux_package_manager)"
+            run_root "$package_manager" install -y ca-certificates "${missing[@]}"
             ;;
         *)
             die "Unsupported distribution: $distro"
